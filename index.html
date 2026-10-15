@@ -527,11 +527,64 @@ function exportarICS(plantoes, nome) {
   ok(`${n} plantão(ões) exportado(s)! Importe em sua agenda (Google, Outlook, Apple).`);
 }
 
-/* Abre o e-mail do computador/celular já preenchido */
-function abrirEmail(para, assunto, corpo) {
-  const lista = [].concat(para).filter(Boolean).join(',');
-  window.location.href = `mailto:${encodeURIComponent(lista).replace(/%2C/g,',')}?subject=${encodeURIComponent(assunto)}&body=${encodeURIComponent(corpo)}`;
+/* E-mail: abre uma janela para escolher Gmail ou o app de e-mail do computador/celular */
+function abrirEmail(para, assunto, corpo, { aviso='' } = {}) {
+  const lista = [].concat(para).filter(Boolean).join(', ');
+  modal({ titulo: 'Enviar por e-mail',
+    corpo: `<div class="campo"><label class="lb">Para</label><input class="inp" id="em-para" value="${esc(lista)}" placeholder="email@exemplo.com"></div>
+      <div class="campo"><label class="lb">Assunto</label><input class="inp" id="em-ass" value="${esc(assunto)}"></div>
+      <div class="campo"><label class="lb">Mensagem</label><textarea class="inp" rows="8" id="em-corpo">${esc(corpo)}</textarea></div>
+      ${aviso ? `<p class="caixa cx-amber small">${aviso}</p>` : ''}`,
+    rodape: `<button class="btn outline" id="em-copiar">${ic('copy')} Copiar texto</button><button class="btn outline" id="em-app">${ic('mail')} App de e-mail</button><button class="btn" id="em-gmail">${ic('send')} Abrir no Gmail</button>`,
+    aoAbrir: m => {
+      const v = () => ({ to: m.$('#em-para').value.split(/[;,]\s*/).filter(Boolean).join(','), su: m.$('#em-ass').value, body: m.$('#em-corpo').value });
+      m.$('#em-gmail').onclick = () => { const x = v(); window.open(`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(x.to)}&su=${encodeURIComponent(x.su)}&body=${encodeURIComponent(x.body)}`, '_blank'); };
+      m.$('#em-app').onclick = () => { const x = v(); window.location.href = `mailto:${x.to}?subject=${encodeURIComponent(x.su)}&body=${encodeURIComponent(x.body)}`; };
+      m.$('#em-copiar').onclick = async () => { const x = v(); try { await navigator.clipboard.writeText(`${x.su}\n\n${x.body}`); ok('Texto copiado'); } catch { erro('Não foi possível copiar'); } };
+    } });
 }
+
+/* Imagem (assinatura) → dataURL para colocar no PDF */
+async function imagemDataUrl(url) {
+  try { const b = await (await fetch(url)).blob(); return await new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(b); }); }
+  catch { return null; }
+}
+
+/* Gera o comprovante em PDF de uma solicitação (com as assinaturas) */
+async function pdfSolicitacao(s, nomeProf='') {
+  const t = TIPOS_SOL[s.tipo], doc = new jspdf.jsPDF();
+  doc.setFillColor(30,58,95); doc.rect(0,0,210,28,'F');
+  doc.setTextColor(255); doc.setFontSize(15); doc.text(t?.titulo || s.titulo || 'Solicitação', 14, 13);
+  doc.setFontSize(9); doc.text(`${NOME_UNIDADE} — Gestão de RH`, 14, 21);
+  doc.setTextColor(30);
+  const linhas = [
+    ['Colaborador', nomeProf || '—'], ['Matrícula', s.matricula || '—'], ['Tipo', t?.label || s.tipo], ['Status', STATUS[s.status]?.label || s.status],
+    ['Data de início', fData(s.data_inicio)], ...(s.data_fim ? [['Data de fim', fData(s.data_fim)]] : []),
+    ...(s.profissional_envolvido ? [['Profissional (troca)', s.profissional_envolvido]] : []),
+    ...(s.horas != null ? [['Horas', s.horas + 'h']] : []), ...(s.valor != null ? [['Valor', fMoeda(s.valor)]] : []),
+    ['Descrição', s.descricao || '—'],
+    ['Aprovação do gestor', s.aprovado_gestor_por ? `${s.aprovado_gestor_por} em ${fDataHora(s.data_aprovacao_gestor)}` : '—'],
+    ['Observação do gestor', s.observacao_gestor || '—'],
+    ['Aprovação do RH', s.aprovado_rh_por ? `${s.aprovado_rh_por} em ${fDataHora(s.data_aprovacao_rh)}` : '—'],
+    ['Observação do RH', s.observacao_rh || '—'],
+    ...(s.anexo_url ? [['Anexo', s.anexo_url]] : []),
+    ['Criado em', fDataHora(s.created_at)],
+  ];
+  doc.autoTable({ startY: 36, body: linhas, theme:'grid', styles:{ fontSize:9, cellPadding:2.5 }, columnStyles:{ 0:{ fontStyle:'bold', cellWidth:48, fillColor:[241,245,249] } } });
+  let y = doc.lastAutoTable.finalY + 10;
+  const assin = [['Solicitante', s.assinatura_solicitante_url], ['Gestor', s.assinatura_gestor_url], ['RH', s.assinatura_rh_url]];
+  if (y > 230) { doc.addPage(); y = 20; }
+  doc.setFontSize(11); doc.text('Assinaturas', 14, y); y += 4;
+  for (let i = 0; i < assin.length; i++) {
+    const [rot, url] = assin[i], x = 14 + i * 62;
+    if (url) { const d = await imagemDataUrl(url); if (d) try { doc.addImage(d, 'PNG', x, y, 56, 24); } catch {} }
+    doc.setDrawColor(150); doc.line(x, y + 27, x + 56, y + 27);
+    doc.setFontSize(8); doc.text(rot, x + 28, y + 31, { align:'center' });
+  }
+  doc.setFontSize(7); doc.setTextColor(120); doc.text(`Documento gerado em ${new Date().toLocaleString('pt-BR')} · ID ${s.id}`, 14, 290);
+  return doc;
+}
+const nomeArquivoSol = s => `solicitacao-${(s.tipo||'').replace(/_/g,'-')}-${s.matricula||'sem-matricula'}-${(s.data_inicio||'').replace(/-/g,'')}.pdf`;
 
 /* Detalhes de uma solicitação (usado no portal, minhas solicitações e aprovações) */
 function htmlDetalheSolicitacao(s) {
@@ -553,22 +606,47 @@ function htmlDetalheSolicitacao(s) {
     ${img(s.assinatura_solicitante_url,'Assinatura do solicitante')}${img(s.assinatura_gestor_url,'Assinatura do gestor')}${img(s.assinatura_rh_url,'Assinatura do RH')}
     <p class="xs muted mt">Criado em ${fDataHora(s.created_at)}</p>`;
 }
-function abrirDetalheSolicitacao(s, { comEmail=false } = {}) {
+function abrirDetalheSolicitacao(s, { comEmail=false, nomeProf='' } = {}) {
   const t = TIPOS_SOL[s.tipo];
+  const podeCompartilhar = !!(navigator.canShare && navigator.canShare({ files:[new File(['x'], 'x.pdf', { type:'application/pdf' })] }));
   modal({
     titulo: esc(t?.label || s.titulo || 'Solicitação'),
     corpo: htmlDetalheSolicitacao(s),
-    rodape: (comEmail && s.status==='aprovado' ? `<button class="btn outline" data-email>${ic('mail')} Enviar resumo por e-mail</button>` : '') + `<button class="btn outline" data-fechar>Fechar</button>`,
+    rodape: `<button class="btn outline" data-pdf>${ic('file-down')} Salvar PDF</button>` +
+      (podeCompartilhar ? `<button class="btn outline" data-share>${ic('share-2')} Compartilhar</button>` : '') +
+      (comEmail ? `<button class="btn outline" data-email>${ic('mail')} Enviar por e-mail</button>` : '') +
+      `<button class="btn outline" data-fechar>Fechar</button>`,
     aoAbrir: m => {
+      let prof = null;
+      const buscarProf = async () => {
+        if (prof || !s.matricula || !comEmail) return prof;
+        try { prof = (await dbq(sb.from('profissionais').select('nome,email').eq('matricula', s.matricula).limit(1)))[0] || null; } catch {}
+        return prof;
+      };
+      const gerar = async () => { const p = await buscarProf(); return pdfSolicitacao(s, nomeProf || p?.nome || ''); };
+      m.$('[data-pdf]').onclick = async e => {
+        const b = e.currentTarget; b.disabled = true;
+        try { (await gerar()).save(nomeArquivoSol(s)); ok('PDF salvo'); } catch (er) { console.error(er); erro('Erro ao gerar PDF'); }
+        b.disabled = false;
+      };
+      const sh = m.$('[data-share]');
+      if (sh) sh.onclick = async () => {
+        try { const doc = await gerar(); const f = new File([doc.output('blob')], nomeArquivoSol(s), { type:'application/pdf' });
+          await navigator.share({ files:[f], title: t?.titulo || 'Solicitação', text: `${t?.label||s.tipo} — ${STATUS[s.status]?.label||s.status}` });
+        } catch (er) { if (er?.name !== 'AbortError') erro('Não foi possível compartilhar'); }
+      };
       const b = m.$('[data-email]');
       if (b) b.onclick = async () => {
-        if (!s.matricula) return erro('Solicitação sem matrícula vinculada');
-        const ps = await dbq(sb.from('profissionais').select('nome,email').eq('matricula', s.matricula).limit(1));
-        if (!ps.length || !ps[0].email) return erro('Colaborador sem e-mail cadastrado');
-        const corpo = `Olá ${ps[0].nome},\n\nSua solicitação foi aprovada. Segue o resumo:\n\nTipo de evento: ${t?.label||s.tipo}\nData: ${fData(s.data_inicio)}\n` +
-          (s.data_fim?`Data fim: ${fData(s.data_fim)}\n`:'') + (s.horas!=null?`Horas: ${s.horas}h\n`:'') +
-          `Observação do gestor: ${s.observacao_gestor||'Sem observação'}\n\nAtenciosamente,\nEquipe de RH — ${NOME_UNIDADE}`;
-        abrirEmail(ps[0].email, `Solicitação aprovada: ${t?.label||s.tipo}`, corpo);
+        const p = await buscarProf();
+        const st = STATUS[s.status]?.label || s.status;
+        const corpo = `Olá ${p?.nome || nomeProf || ''},\n\nSegue o resumo da sua solicitação (${st.toLowerCase()}):\n\nTipo de evento: ${t?.label||s.tipo}\nData: ${fData(s.data_inicio)}\n` +
+          (s.data_fim?`Data fim: ${fData(s.data_fim)}\n`:'') + (s.horas!=null?`Horas: ${s.horas}h\n`:'') + (s.valor!=null?`Valor: ${fMoeda(s.valor)}\n`:'') +
+          `Status: ${st}\n` + (s.aprovado_gestor_por?`Gestor: ${s.aprovado_gestor_por}\n`:'') + (s.aprovado_rh_por?`RH: ${s.aprovado_rh_por}\n`:'') +
+          `Observação do gestor: ${s.observacao_gestor||'Sem observação'}\n` + (s.observacao_rh?`Observação do RH: ${s.observacao_rh}\n`:'') +
+          `\nAtenciosamente,\nEquipe de RH — ${NOME_UNIDADE}`;
+        try { (await gerar()).save(nomeArquivoSol(s)); } catch {}
+        abrirEmail(p?.email || '', `Solicitação ${st.toLowerCase()}: ${t?.label||s.tipo}`, corpo,
+          { aviso: `O PDF do comprovante foi baixado (${nomeArquivoSol(s)}). Anexe-o ao e-mail antes de enviar.${p?.email ? '' : ' Este colaborador não tem e-mail cadastrado — digite o destinatário.'}` });
       };
     }
   });
@@ -696,7 +774,7 @@ async function pagePortal(el, { matricula }) {
     icones();
     montarCalendario($('#cal'), { eventos, compacto:true, maxDia:2, detalheEl: $('#cal-det'), limitarAno:true });
     $('#ics').onclick = () => plant.length ? exportarICS(plant, p.nome) : erro('Nenhum plantão para sincronizar');
-    $$('[data-sol]').forEach(b => b.onclick = () => abrirDetalheSolicitacao(sols.find(s => s.id === b.dataset.sol)));
+    $$('[data-sol]').forEach(b => b.onclick = () => abrirDetalheSolicitacao(sols.find(s => s.id === b.dataset.sol), { nomeProf: p.nome }));
     $$('[data-lida]').forEach(b => b.onclick = async () => {
       try { await dbq(sb.rpc('portal_marcar_lida', { p_matricula: p.matricula, p_id: b.dataset.lida })); notifs = notifs.map(n => n.id===b.dataset.lida ? {...n, lida:true} : n); desenhar(); } catch {}
     });
